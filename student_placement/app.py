@@ -12,7 +12,7 @@ st.set_page_config(page_title="Student Placement Predictor", layout="centered")
 def train_model():
     # 1. Load the dataset
     try:
-        data = pd.read_csv("placement-data.csv") 
+        data = pd.read_csv("student_placement/placement-data.csv")
     except FileNotFoundError:
         return None, None, None, "Dataset not found. Please ensure 'placement-data.csv' is uploaded."
 
