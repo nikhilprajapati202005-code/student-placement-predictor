@@ -2,6 +2,7 @@ import streamlit as st # Import the Streamlit library for the web interface
 import pandas as pd # Import Pandas for data handling
 import joblib # Import joblib to save/load the trained model (no retraining on restart)
 import os # Import os to check if a saved model file exists
+from pathlib import Path # Import Path to locate files next to this script (works on any computer)
 from sklearn.ensemble import RandomForestClassifier # Import the ML algorithm
 from sklearn.model_selection import train_test_split # Import data splitting tool
 from sklearn.preprocessing import LabelEncoder # Import tool to convert text to numbers
@@ -9,21 +10,27 @@ from sklearn.preprocessing import LabelEncoder # Import tool to convert text to 
 # Set up the web page tab title and layout
 st.set_page_config(page_title="Student Placement Predictor", layout="centered")
 
+# Always find data and model files in the same folder as app.py.
+# Streamlit Cloud starts from the repo root, so naive relative paths fail there.
+BASE_DIR = Path(__file__).parent
+
 # Use st.cache_resource so the model only trains ONCE when the app starts, not every time a user clicks a button
 @st.cache_resource 
 def train_model():
     # 0. If we trained before, load the saved model instead (much faster startup)
-    if os.path.exists("placement_model.pkl") and os.path.exists("placement_meta.pkl"):
+    model_path = BASE_DIR / "placement_model.pkl"
+    meta_path = BASE_DIR / "placement_meta.pkl"
+    if model_path.exists() and meta_path.exists():
         try:
-            model = joblib.load("placement_model.pkl")
-            meta = joblib.load("placement_meta.pkl")
+            model = joblib.load(model_path)
+            meta = joblib.load(meta_path)
             return model, meta["le_status"], meta["features"], meta["accuracy"], meta["n_students"], "Model loaded from saved file"
         except Exception:
             pass # If loading fails for any reason, just retrain below
 
     # 1. Load the dataset
     try:
-        data = pd.read_csv("placement-data.csv") 
+        data = pd.read_csv(BASE_DIR / "placement-data.csv") 
     except FileNotFoundError:
         return None, None, None, None, None, "Dataset not found. Please ensure 'placement-data.csv' is uploaded."
 
@@ -53,12 +60,17 @@ def train_model():
     # 5. Measure how accurate the model is on test data it has NEVER seen before
     accuracy = model.score(X_test, y_test) # e.g. 0.83 means 83% of predictions were correct
     
-    # 6. Save the trained model to disk so the next app start doesn't need to retrain
-    joblib.dump(model, "placement_model.pkl")
-    joblib.dump(
-        {"le_status": le_status, "features": features, "accuracy": accuracy, "n_students": len(data)},
-        "placement_meta.pkl"
-    )
+    # 6. Save the trained model to disk so the next app start doesn't need to retrain.
+    # On some hosting services the folder is read-only, so saving is optional — the app
+    # simply retrains on the next start if saving isn't possible.
+    try:
+        joblib.dump(model, model_path)
+        joblib.dump(
+            {"le_status": le_status, "features": features, "accuracy": accuracy, "n_students": len(data)},
+            meta_path
+        )
+    except Exception:
+        pass # Saving failed (e.g. read-only filesystem); the model still works for this session
     
     return model, le_status, features, accuracy, len(data), "Trained a new model"
 
