@@ -1,5 +1,7 @@
 import streamlit as st # Import the Streamlit library for the web interface
 import pandas as pd # Import Pandas for data handling
+import joblib # Import joblib to save/load the trained model (no retraining on restart)
+import os # Import os to check if a saved model file exists
 from sklearn.ensemble import RandomForestClassifier # Import the ML algorithm
 from sklearn.model_selection import train_test_split # Import data splitting tool
 from sklearn.preprocessing import LabelEncoder # Import tool to convert text to numbers
@@ -10,11 +12,20 @@ st.set_page_config(page_title="Student Placement Predictor", layout="centered")
 # Use st.cache_resource so the model only trains ONCE when the app starts, not every time a user clicks a button
 @st.cache_resource 
 def train_model():
+    # 0. If we trained before, load the saved model instead (much faster startup)
+    if os.path.exists("placement_model.pkl") and os.path.exists("placement_meta.pkl"):
+        try:
+            model = joblib.load("placement_model.pkl")
+            meta = joblib.load("placement_meta.pkl")
+            return model, meta["le_status"], meta["features"], meta["accuracy"], meta["n_students"], "Model loaded from saved file"
+        except Exception:
+            pass # If loading fails for any reason, just retrain below
+
     # 1. Load the dataset
     try:
-        data = pd.read_csv("student_placement/placement-data.csv")
+        data = pd.read_csv("placement-data.csv") 
     except FileNotFoundError:
-        return None, None, None, "Dataset not found. Please ensure 'placement-data.csv' is uploaded."
+        return None, None, None, None, None, "Dataset not found. Please ensure 'placement-data.csv' is uploaded."
 
     # 2. Preprocess the data (convert Yes/No to 1/0)
     le_extra = LabelEncoder()
@@ -35,13 +46,24 @@ def train_model():
 
     # 4. Train the model
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    model = RandomForestClassifier(n_estimators=100, random_state=42)
+    # max_depth and min_samples_leaf stop the trees from memorizing the training data (overfitting)
+    model = RandomForestClassifier(n_estimators=100, max_depth=12, min_samples_leaf=10, random_state=42)
     model.fit(X_train, y_train)
     
-    return model, le_status, features, "Success"
+    # 5. Measure how accurate the model is on test data it has NEVER seen before
+    accuracy = model.score(X_test, y_test) # e.g. 0.83 means 83% of predictions were correct
+    
+    # 6. Save the trained model to disk so the next app start doesn't need to retrain
+    joblib.dump(model, "placement_model.pkl")
+    joblib.dump(
+        {"le_status": le_status, "features": features, "accuracy": accuracy, "n_students": len(data)},
+        "placement_meta.pkl"
+    )
+    
+    return model, le_status, features, accuracy, len(data), "Trained a new model"
 
 # Run the training function
-model, le_status, features, status_message = train_model()
+model, le_status, features, accuracy, n_students, status_message = train_model()
 
 # --- WEB INTERFACE DESIGN ---
 
@@ -51,6 +73,12 @@ st.write("Enter the student's details below to predict if they will be placed du
 if model is None:
     st.error(status_message) # Show an error if the CSV is missing
 else:
+    # Show the model's real performance in the sidebar
+    with st.sidebar:
+        st.header("📊 About the Model")
+        st.metric("Test Accuracy", f"{accuracy * 100:.1f}%")
+        st.metric("Students in Dataset", f"{n_students:,}")
+        st.caption(f"Source: {status_message} • 80% of data used for training, 20% held out for testing")
     # Create two columns to make the form look neat
     col1, col2 = st.columns(2)
     
@@ -78,16 +106,28 @@ else:
         input_data = pd.DataFrame([[cgpa, interns, projs, workshops, aptitude, soft_skills, extra_val, training_val, ssc, hsc]], 
                                   columns=features)
         
-        # Make the prediction
+        # Make the prediction AND get the model's confidence level
         prediction_num = model.predict(input_data)
+        pred_probs = model.predict_proba(input_data)[0] # e.g. [0.88, 0.12]
         
         # Convert the predicted number (1 or 0) back to text ("Placed" or "NotPlaced")
         predicted_text = le_status.inverse_transform(prediction_num)[0]
         
+        # Pick the probability that matches the predicted class
+        confidence = pred_probs[list(le_status.classes_).index(predicted_text)] * 100
+        
         st.divider() # Draw a line on the screen
         
-        # Display results with colors
+        # Display results with colors, now including how confident the model is
         if predicted_text == "Placed":
-            st.success("🎉 Prediction: **This student is highly likely to be PLACED.**")
+            st.success(f"🎉 Prediction: **This student is highly likely to be PLACED.** (Model confidence: {confidence:.1f}%)")
         else:
-            st.error("⚠️ Prediction: **This student is likely NOT PLACED.**")
+            st.error(f"⚠️ Prediction: **This student is likely NOT PLACED.** (Model confidence: {confidence:.1f}%)")
+        
+        st.progress(confidence / 100, text=f"Model confidence: {confidence:.1f}%")
+        
+        # Feature importance chart: show WHICH features the Random Forest relied on most
+        with st.expander("🔍 Which features influenced the prediction the most?"):
+            st.write("The Random Forest automatically learns how important each feature is when deciding:")
+            importances = pd.Series(model.feature_importances_, index=features).sort_values(ascending=False)
+            st.bar_chart(importances)
